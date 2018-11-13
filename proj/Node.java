@@ -149,7 +149,10 @@ public class Node {
 	case Protocol.PING_REPLY_PKT:
 	    this.receivePingReply(packet);
 	    break;
-
+	    // TODO add case for TCP and do the multiplexing
+    case Protocol.TRANSPORT_PKT:
+        tcpMan.
+        break;
 	default:
 	    logError("Packet with unknown protocol received. Protocol: " + packet.getProtocol());
 	}

@@ -47,4 +47,11 @@ public class TCPManager {
     /*
      * End Socket API
      */
+
+     // TODO onReceiveSegment
+    void onReceivePacket()
+     // extract value for multiplexing, find the right socket
+     // check server socket and connection socket can exist
+
+    // TODO onWrite
 }

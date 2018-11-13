@@ -39,6 +39,11 @@ public class TCPSock {
      */
     public int bind(int localPort) {
         return -1;
+        // check port used or not
+
+        // check if port in right range
+
+        // check socket state
     }
 
     /**
@@ -48,6 +53,8 @@ public class TCPSock {
      */
     public int listen(int backlog) {
         return -1;
+        // TODO check state and change state
+        // make connection queue of size backlog
     }
 
     /**
@@ -56,6 +63,7 @@ public class TCPSock {
      * @return TCPSock The first established connection on the request queue
      */
     public TCPSock accept() {
+        // TODO check state and connection queue, and return null as nonblocking
         return null;
     }
 
@@ -83,6 +91,8 @@ public class TCPSock {
      * @return int 0 on success, -1 otherwise
      */
     public int connect(int destAddr, int destPort) {
+        // TODO manage state send syn
+        // create timeout handle syn loss
         return -1;
     }
 
@@ -123,10 +133,18 @@ public class TCPSock {
      *             than len; on failure, -1
      */
     public int read(byte[] buf, int pos, int len) {
+        // TODO check socket state, read from socket interval buffer
         return -1;
     }
 
     /*
      * End of socket API
      */
+
+     // TODO need a receive method for tcp manager to call,
+     // 1. check state
+     // 2. copy data to internal buffer
+     // 3. send ACK
+     // 4. cirrcular buffer size 64KB
+     // 5. in case of overflow drop and send ACK, we have flow control
 }
