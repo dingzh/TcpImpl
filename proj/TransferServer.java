@@ -120,6 +120,8 @@ public class TransferServer extends FishThread {
                     for (int i = index; i < index + count; i++) {
                         if (buf[i] != (byte) i) {
                             // data corrupted
+                            byte[] res = new byte[count];
+                            System.arraycopy(buf, index, res, 0, count);
                             node.logError("time = " + manager.now() + " msec");
                             node.logError("data corruption detected");
                             node.logError("position = " + pos);

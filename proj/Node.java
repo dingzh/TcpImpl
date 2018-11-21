@@ -102,112 +102,113 @@ public class Node {
      * Callback method given to manager to invoke when a timer fires.
      */
     public void pingTimedOut() {
-	Iterator iter = this.pings.iterator();
-	while(iter.hasNext()) {
-	    PingRequest pingRequest = (PingRequest)iter.next();
-	    if((pingRequest.getTimeSent() + PingTimeout) < this.manager.now()) {
-		try {
-		    logOutput("Timing out ping: " + pingRequest);
-		    iter.remove();
-		}catch(Exception e) {
-		    logError("Exception occured while trying to remove an element from ArrayList pings.  Exception: " + e);
-		    return;
-		}
-	    }
-	}
-	this.addTimer(PingTimeout, "pingTimedOut");
+        Iterator iter = this.pings.iterator();
+        while(iter.hasNext()) {
+            PingRequest pingRequest = (PingRequest)iter.next();
+            if((pingRequest.getTimeSent() + PingTimeout) < this.manager.now()) {
+            try {
+                logOutput("Timing out ping: " + pingRequest);
+                iter.remove();
+            }catch(Exception e) {
+                logError("Exception occured while trying to remove an element from ArrayList pings.  Exception: " + e);
+                return;
+            }
+            }
+        }
+        this.addTimer(PingTimeout, "pingTimedOut");
     }
 
     private boolean matchPingCommand(String command) {
-	int index = command.indexOf(" ");
-	if(index == -1) {
-	    return false;
-	}
-	try {
-	    int destAddr = Integer.parseInt(command.substring(0, index));
-	    String message = command.substring(index+1);
-	    Packet packet = new Packet(destAddr, this.addr, Packet.MAX_TTL, Protocol.PING_PKT, 0,
-				       Utility.stringToByteArray(message));
+        int index = command.indexOf(" ");
+        if(index == -1) {
+            return false;
+        }
+        try {
+            int destAddr = Integer.parseInt(command.substring(0, index));
+            String message = command.substring(index+1);
+            Packet packet = new Packet(destAddr, this.addr, Packet.MAX_TTL, Protocol.PING_PKT, 0,
+                           Utility.stringToByteArray(message));
 
-	    this.send(destAddr, packet);
-	    this.pings.add(new PingRequest(destAddr, Utility.stringToByteArray(message), this.manager.now()));
-	    return true;
-	}catch(Exception e) {
-	    logError("Exception: " + e);
-	}
+            this.send(destAddr, packet);
+            this.pings.add(new PingRequest(destAddr, Utility.stringToByteArray(message), this.manager.now()));
+            return true;
+        }catch(Exception e) {
+            logError("Exception: " + e);
+        }
 
-	return false;
+        return false;
     }
 
     private void receivePacket(int from, Packet packet) {
-	switch(packet.getProtocol()) {
+        switch(packet.getProtocol()) {
 
-	case Protocol.PING_PKT:
-	    this.receivePing(packet);
-	    break;
+            case Protocol.PING_PKT:
+                this.receivePing(packet);
+                break;
 
-	case Protocol.PING_REPLY_PKT:
-	    this.receivePingReply(packet);
-	    break;
-	    // TODO add case for TCP and do the multiplexing
-    case Protocol.TRANSPORT_PKT:
-        tcpMan.
-        break;
-	default:
-	    logError("Packet with unknown protocol received. Protocol: " + packet.getProtocol());
-	}
+            case Protocol.PING_REPLY_PKT:
+                this.receivePingReply(packet);
+                break;
+
+            case Protocol.TRANSPORT_PKT:
+                tcpMan.onReceivePacket(packet);
+                break;
+
+            default:
+                logError("Packet with unknown protocol received. Protocol: " + packet.getProtocol());
+        }
     }
 
     private void receivePing(Packet packet) {
-	logOutput("Received Ping from " + packet.getSrc() + " with message: " + Utility.byteArrayToString(packet.getPayload()));
+        logOutput("Received Ping from " + packet.getSrc() + " with message: " + Utility.byteArrayToString(packet.getPayload()));
 
-	try {
-	    Packet reply = new Packet(packet.getSrc(), this.addr, Packet.MAX_TTL, Protocol.PING_REPLY_PKT, 0, packet.getPayload());
-	    this.send(packet.getSrc(), reply);
-	}catch(IllegalArgumentException e) {
-	    logError("Exception while trying to send a Ping Reply. Exception: " + e);
-	}
+        try {
+            Packet reply = new Packet(packet.getSrc(), this.addr, Packet.MAX_TTL, Protocol.PING_REPLY_PKT, 0, packet.getPayload());
+            this.send(packet.getSrc(), reply);
+        }catch(IllegalArgumentException e) {
+            logError("Exception while trying to send a Ping Reply. Exception: " + e);
+        }
     }
 
     // Check that ping reply matches what was sent
     private void receivePingReply(Packet packet) {
-	Iterator iter = this.pings.iterator();
-	String payload = Utility.byteArrayToString(packet.getPayload());
-	while(iter.hasNext()) {
-	    PingRequest pingRequest = (PingRequest)iter.next();
-	    if( (pingRequest.getDestAddr() == packet.getSrc()) &&
-		( Utility.byteArrayToString(pingRequest.getMsg()).equals(payload))) {
+        Iterator iter = this.pings.iterator();
+        String payload = Utility.byteArrayToString(packet.getPayload());
+        while(iter.hasNext()) {
+            PingRequest pingRequest = (PingRequest)iter.next();
+            if( (pingRequest.getDestAddr() == packet.getSrc()) &&
+            ( Utility.byteArrayToString(pingRequest.getMsg()).equals(payload))) {
 
-		logOutput("Got Ping Reply from " + packet.getSrc() + ": " + payload);
-		try {
-		    iter.remove();
-		}catch(Exception e) {
-		    logError("Exception occured while trying to remove an element from ArrayList pings while processing Ping Reply.  Exception: " + e);
-		}
-		return;
-	    }
-	}
-	logError("Unexpected Ping Reply from " + packet.getSrc() + ": " + payload);
+            logOutput("Got Ping Reply from " + packet.getSrc() + ": " + payload);
+            try {
+                iter.remove();
+            }catch(Exception e) {
+                logError("Exception occured while trying to remove an element from ArrayList pings while processing Ping Reply.  Exception: " + e);
+            }
+            return;
+            }
+        }
+        logError("Unexpected Ping Reply from " + packet.getSrc() + ": " + payload);
     }
 
     private void send(int destAddr, Packet packet) {
-	try {
-	    this.manager.sendPkt(this.addr, destAddr, packet.pack());
-	}catch(IllegalArgumentException e) {
-	    logError("Exception: " + e);
-	}
+        try {
+            this.manager.sendPkt(this.addr, destAddr, packet.pack());
+        }catch(IllegalArgumentException e) {
+            logError("Exception: " + e);
+        }
     }
 
     // Adds a timer, to fire in deltaT milliseconds, with a callback to a public function of this class that takes no parameters
     private void addTimer(long deltaT, String methodName) {
-	try {
-	    Method method = Callback.getMethod(methodName, this, null);
-	    Callback cb = new Callback(method, this, null);
-	    this.manager.addTimer(this.addr, deltaT, cb);
-	}catch(Exception e) {
-	    logError("Failed to add timer callback. Method Name: " + methodName +
-		     "\nException: " + e);
-	}
+        try {
+            Method method = Callback.getMethod(methodName, this, null);
+            Callback cb = new Callback(method, this, null);
+            this.manager.addTimer(this.addr, deltaT, cb);
+        }catch(Exception e) {
+            logError("Failed to add timer callback. Method Name: " + methodName +
+                 "\nException: " + e);
+        }
     }
 
     // Fishnet reliable data transfer
@@ -217,7 +218,7 @@ public class Node {
      * entry point for the transport layer)
      *
      * @param srcAddr int Source node address
-     * @param destAddr int Sestination node address
+     * @param destAddr int Destination node address
      * @param protocol int Transport layer protocol to use
      * @param payload byte[] Payload to be sent
      */
