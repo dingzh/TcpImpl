@@ -128,11 +128,11 @@ public class TCPManager {
 
 
     // best effort match
-    TCPSock matchSocket(int destAddr, int desPort,  int srcAddr, int srcPort ) {
+    TCPSock matchSocket(int destAddr, int destPort,  int srcAddr, int srcPort ) {
 //        logOutput("destAddr " + destAddr + " destPort " + desPort + " srcAddr " + srcAddr + " srcPort " + srcPort);
         if (destAddr != addr) return null;
 
-        HashMap<Pair<Integer, Integer>, TCPSock> socks = portMapping.get(desPort);
+        HashMap<Pair<Integer, Integer>, TCPSock> socks = portMapping.get(destPort);
         Pair<Integer, Integer> remote = new Pair<>(srcAddr, srcPort);
         if (socks != null && socks.containsKey(remote)) {
             return socks.get(remote);
@@ -146,9 +146,19 @@ public class TCPManager {
         return null;
     }
 
+    void closeSocket(TCPSock sock, int localPort, int destAddr, int destPort) {
+        if (sock != matchSocket(addr, localPort, destAddr, destPort)) {
+            logError("Closing wrong socket");
+        }
+
+        HashMap<Pair<Integer, Integer>, TCPSock> socks = portMapping.get(localPort);
+        Pair<Integer, Integer> key = new Pair<>(destAddr, destPort);
+
+        socks.remove(key);
+    }
 
 
-    // TODO onWrite
+
     /**
      * Bind port to a socket
      *
@@ -156,7 +166,8 @@ public class TCPManager {
      *                 a local port
      */
     int bindLocal(TCPSock sock, int localPort) {
-        if (portMapping.containsKey(localPort)) return -1;
+        // server socket listening on this port
+        if (matchSocket(addr, localPort, -1, -1) != null) return -1;
 
         HashMap<Pair<Integer, Integer>, TCPSock> val = new HashMap<>();
         val.put(new Pair<>(-1, -1), sock);
@@ -166,11 +177,15 @@ public class TCPManager {
     }
 
     TCPSock bindRemote(int localPort, int remoteAddr, int remotePort) {
+        return bindRemote(localPort, remoteAddr, remotePort, null);
+    }
+
+    TCPSock bindRemote(int localPort, int remoteAddr, int remotePort, TCPSock socket) {
         // check if connect exist already
         HashMap<Pair<Integer, Integer>, TCPSock> socks = portMapping.get(localPort);
         Pair<Integer, Integer> remote = new Pair<>(remoteAddr, remotePort);
         if (socks != null && !socks.containsKey(remote)) {
-            TCPSock socket = socket();
+            if (socket == null) socket = socket();
             socks.put(remote, socket);
             return socket;
         }

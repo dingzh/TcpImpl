@@ -1,5 +1,3 @@
-import com.sun.tools.internal.xjc.reader.Ring;
-
 import java.lang.reflect.Method;
 import java.util.LinkedList;
 import java.util.NoSuchElementException;
@@ -20,11 +18,11 @@ import static java.lang.System.exit;
  * @version 1.0
  */
 
+// TODO add timeout close
 public class TCPSock {
     // TCP socket states
     enum State {
         // protocol states
-        WAIT_BIND,   // socket create, not bind yet
         BOUND,
         LISTEN,
         SYN_SENT,    // sent syn, waiting for ack
@@ -39,11 +37,11 @@ public class TCPSock {
     private Method mRetransmit = null;
     private Method mReconnect = null;
     private TCPManager tcpMan;
-    private State state = State.WAIT_BIND;
+    private State state = State.CLOSED;
 
     private int localPort = 0;
-    private int destAddr = 0;
-    private int destPort = 0;
+    private int destAddr = -1;
+    private int destPort = -1;
 
     private int seqNum = 0;
     private int window = 1;
@@ -87,7 +85,7 @@ public class TCPSock {
      */
     public int bind(int localPort) {
         int ret = -1;
-        if (state == State.WAIT_BIND) {
+        if (state == State.CLOSED) {
             // delegate TCPManager to bind port
             ret = tcpMan.bindLocal(this, localPort);
             if (ret == 0) {
@@ -182,6 +180,10 @@ public class TCPSock {
             return -1;
         }
 
+        TCPSock sock = tcpMan.bindRemote(localPort, destAddr, destPort, this);
+        if (sock != this || sock == null) return -1;
+        tcpMan.closeSocket(this, localPort, -1, -1);
+
         // todo set up seqNum
         seqNum = 0;
         this.destAddr = destAddr;
@@ -224,17 +226,25 @@ public class TCPSock {
         switch (state) {
             case ESTABLISHED_WRITE:
                 // will send fin when all data sent
-                state = State.SHUTDOWN;
+                if (pendingSegment != null) {
+                    state = State.SHUTDOWN;
+                } else {
+                    state = State.CLOSED;
+                    tcpMan.sendFin(localPort, destAddr, destPort);
+                    tcpMan.closeSocket(this, localPort, destAddr, destPort);
+                }
                 break;
 
             case ESTABLISHED_READ:
                 tcpMan.sendFin(localPort, destAddr, destPort);
                 state = State.CLOSED;
+                tcpMan.closeSocket(this, localPort, destAddr, destPort);
                 rb = null;
                 break;
 
             case LISTEN:
                 state = State.CLOSED;
+                tcpMan.closeSocket(this, localPort, -1, -1);
                 synQueue = null;
                 break;
 
@@ -348,7 +358,7 @@ public class TCPSock {
         } else {
             tcpMan.logOutput(TCPManager.ACK_2_SYMBOL);
             // seqNum does not match, meaning data corrupted, need to retransmit
-            retransmit(seqNum);
+//            retransmit(seqNum);
         }
     }
 
@@ -405,6 +415,7 @@ public class TCPSock {
             case ESTABLISHED_READ:  // all segments are acked, sender makes sure of that before FIN
             case ESTABLISHED_WRITE: // the remote refused to receive
                 state = State.CLOSED;
+                tcpMan.closeSocket(this, localPort, destAddr, destPort);
                 break;
         }
     }
