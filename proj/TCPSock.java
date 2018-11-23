@@ -1,7 +1,6 @@
 import java.lang.reflect.Method;
-import java.util.LinkedList;
-import java.util.NoSuchElementException;
-import java.util.Queue;
+import java.security.AlgorithmConstraints;
+import java.util.*;
 
 import static java.lang.System.exit;
 
@@ -29,10 +28,13 @@ public class TCPSock {
         ESTABLISHED_WRITE, // create data buffer when connection established
         ESTABLISHED_READ,  // since this is one-way stream
         SHUTDOWN,    // close requested, FIN not sent (due to unsent data in queue)
+        FIN_WAIT,
         CLOSED       // socket is finished
     }
 
-    private static int DATA_BUFFER_SIZE = 64 * 1024; // 64KB buffer
+    private static final int DATA_BUFFER_SIZE = 64 * 1024; // 64KB buffer
+    private static final double ALPHA = 0.125;
+    private static final double BETA = 0.25;
 
     private Method mRetransmit = null;
     private Method mReconnect = null;
@@ -44,15 +46,20 @@ public class TCPSock {
     private int destPort = -1;
 
     private int seqNum = 0;
-    private int window = 1;
+//    private int window = 2;
     private int backlog = 0;
     private Queue<int[]> synQueue = null;
     private RingBuffer rb = null;     // one-way stream only one buffer needed
 
-    private long timeout = 100;
-    private Transport pendingSegment = null;
+    private long timeout = 90;
+    private int rcvw = 1;
+    private int sedw = 10;
+    private ArrayDeque<WindowCell> sendWindow = null;
+    private PriorityQueue<WindowCell> recvWindow = null;
 
-    private int RTT;
+    private int duplicateACK = 0;
+    private double RTT = 50;
+    private double RTTDev = 10;
 
     public TCPSock(TCPManager tcpMan) {
         this.tcpMan = tcpMan;
@@ -60,11 +67,9 @@ public class TCPSock {
         Class[] paramReconnect = new Class[2];
         paramReconnect[0] = int.class;
         paramReconnect[1] = int.class;
-        Class[] paramRetransmit = new Class[1];
-        paramRetransmit[0] = int.class;
 
         try {
-            mRetransmit = this.getClass().getMethod("retransmit", paramRetransmit);
+            mRetransmit = this.getClass().getMethod("retransmit", null);
             mReconnect = this.getClass().getMethod("reconnect", paramReconnect);
         } catch (NoSuchMethodException ex) {
             tcpMan.logError(ex.toString());
@@ -140,8 +145,9 @@ public class TCPSock {
                 client.destAddr = remote[0];
                 client.destPort = remote[1];
                 client.seqNum = remote[2] + 1;  // received syn, expecting next
-                client.window = 1;
-                tcpMan.sendAck(localPort, remote[0], remote[1], client.window, client.seqNum);
+                client.rcvw = 1;
+                client.recvWindow = new PriorityQueue<>();
+                tcpMan.sendAck(localPort, remote[0], remote[1], client.rcvw, client.seqNum);
                 return client;
             }
         }
@@ -185,14 +191,13 @@ public class TCPSock {
         tcpMan.closeSocket(this, localPort, -1, -1);
 
         // todo set up seqNum
-        seqNum = 0;
+        seqNum = (int) tcpMan.now();
         this.destAddr = destAddr;
         this.destPort = destPort;
         state = State.SYN_SENT;
         tcpMan.sendSyn(localPort, destAddr, destPort, seqNum);
 
         // get method to call if connect request timeout
-
 
         Object[] params = new Object[2];
         params[0] = destAddr;
@@ -226,7 +231,7 @@ public class TCPSock {
         switch (state) {
             case ESTABLISHED_WRITE:
                 // will send fin when all data sent
-                if (pendingSegment != null) {
+                if (sendWindow.size() != 0) {
                     state = State.SHUTDOWN;
                 } else {
                     state = State.CLOSED;
@@ -306,59 +311,93 @@ public class TCPSock {
      */
 
     void sendData() {
-        if (pendingSegment != null) return ;
-        // check if more data to send
-        int len = rb.avail();
-        if (len == 0) {
-            if (state == State.SHUTDOWN) state = State.CLOSED;
+        boolean setTimer = true;
+        long now = tcpMan.now();
+        while (sendWindow.size() < sedw) {
+            int len = rb.avail();
+            if (len == 0) { return ; }
+            len = Math.min(len, Transport.MAX_PAYLOAD_SIZE);
+
+            byte[] data = new byte[len];
+            rb.read(data, 0, len);
+            // todo should receiver check window size?
+            Transport transport = new Transport(localPort, destPort, Transport.DATA, sedw, seqNum, data);
+            WindowCell wc = new WindowCell(now, seqNum, len, transport);
+            sendWindow.addLast(wc);
+
+            tcpMan.sendData(destAddr, transport.pack());
+            tcpMan.logOutput("" + seqNum + "\t" + data[0] + " -> " + data[len-1]);
+            seqNum += len;
+
+            // get method to call if send timeout
+            if (setTimer) {
+                setTimer = false;
+                Callback cb = new Callback(mRetransmit, this, null);
+                tcpMan.logOutput("Set timer " + timeout);
+                tcpMan.addTimer(timeout, cb);
+            }
+        }
+    }
+
+    public void retransmit() {
+        // todo adjust sending window size
+        if (state != State.ESTABLISHED_WRITE ) return ;
+
+        WindowCell wc = sendWindow.peekFirst();
+        // it's not possible for any ack segment to be on the head
+        if (wc == null || wc.time + timeout > tcpMan.now()) {
             return ;
         }
 
-        len = Math.min(len, Transport.MAX_PAYLOAD_SIZE);
-        byte[] data = new byte[len];
-        rb.read(data, 0, len);
-        Transport transport = new Transport(localPort, destPort, Transport.DATA, window, seqNum, data);
-        pendingSegment = transport;
-        tcpMan.sendData(destAddr, pendingSegment.pack());
-        tcpMan.logOutput("" + seqNum + "\t" + data[0] + " -> " + data[len-1]);
-        // get method to call if connect request timeout
-        Object[] params = new Object[1];
-        params[0] = seqNum;
+        // TODO debug only
+        byte[] data = wc.transport.getPayload();
+        tcpMan.logOutput("" + wc.seqNum + "\t" + data[0] + " -> " + data[data.length-1] + " timeout");
 
-        Callback cb = new Callback(mRetransmit, this, params);
+        tcpMan.sendData(destAddr, wc.transport.pack());
+
+        Callback cb = new Callback(mRetransmit, this, null);
         tcpMan.addTimer(timeout, cb);
-        // TODO add timer for RTT
-        // TODO make sure packet size is large enough
-    }
-
-    public void retransmit(int seqNum) {
-        if (state == State.ESTABLISHED_WRITE && pendingSegment != null && pendingSegment.getSeqNum() == seqNum) {
-            byte[] data = pendingSegment.getPayload();
-            tcpMan.logOutput("" + seqNum + "\t" + data[0] + " -> " + data[data.length-1] + " R");
-            tcpMan.sendData(destAddr, pendingSegment.pack());
-
-            Object[] params = new Object[1];
-            params[0] = seqNum;
-
-            Callback cb = new Callback(mRetransmit, this, params);
-            tcpMan.addTimer(timeout, cb);
-        }
     }
 
     void onACK(int ack) {
-        // TODO impplement sliding window
-        if (pendingSegment == null) return ; // duplicate ack
-        int expectSeqNum = seqNum + pendingSegment.getPayload().length;
-        tcpMan.logOutput("ACK\t" + ack);
-        if (ack == expectSeqNum ) {
-            tcpMan.logOutput(TCPManager.ACK_1_SYMBOL);
-            seqNum = expectSeqNum;
-            pendingSegment = null;
-            sendData();
-        } else {
-            tcpMan.logOutput(TCPManager.ACK_2_SYMBOL);
-            // seqNum does not match, meaning data corrupted, need to retransmit
-//            retransmit(seqNum);
+        if (sendWindow.size() == 0) return ; // no pending send
+
+        WindowCell wc = sendWindow.peekFirst();
+        while (wc != null) {
+            sendWindow.removeFirst();
+
+            if (ack == wc.seqNum) {
+                ++duplicateACK;
+                if (duplicateACK == 3) {
+                    duplicateACK = 0;
+                    byte[] data = wc.transport.getPayload();
+                    tcpMan.sendData(destAddr, wc.transport.pack());
+                    tcpMan.logOutput("" + seqNum + "\t" + data[0] + " -> " + data[data.length-1] + " dACK");
+                }
+
+                return ;
+            } else if (ack >= wc.seqNum + wc.dataLength) { // cumulative ack
+                duplicateACK = 0;
+                tcpMan.logOutput("ACKed\t" + ack);
+                tcpMan.logOutput(TCPManager.ACK_1_SYMBOL);
+
+//                if (ack == wc.seqNum + wc.dataLength) {
+                double sampleRTT = tcpMan.now() - wc.time;
+
+                RTT = (1 - ALPHA) * RTT + ALPHA * sampleRTT;
+                RTTDev = (1 - BETA) * RTTDev + BETA * Math.abs(sampleRTT - RTT);
+                timeout = (int) (RTT + 4 * RTTDev);
+                tcpMan.logOutput("Updating timeout to " + timeout);
+//                }
+
+                // try to send data
+                sendData();
+            } else {
+                // will not remove cause not ACKed
+                break;
+            }
+
+            wc = sendWindow.peekFirst();
         }
     }
 
@@ -380,7 +419,7 @@ public class TCPSock {
     }
 
     void onAckSyn() {
-        tcpMan.sendAck(localPort, destAddr, destPort, window, seqNum);
+        tcpMan.sendAck(localPort, destAddr, destPort, rcvw, seqNum);
     }
 
     // TODO need a receive method for tcp manager to call,
@@ -391,22 +430,36 @@ public class TCPSock {
     // 5. in case of overflow drop and send ACK, we have flow control
     public void onData(Transport transport) {
         // i'm the receiver, which is the server
-        if (seqNum == transport.getSeqNum()) {
-            byte[] data = transport.getPayload();
-            if (data.length <= rb.free()) {
-                tcpMan.logOutput("Accept\t" + data[0] + " -> " + data[data.length-1]);
-                rb.write(data, 0, data.length);
-                seqNum += data.length;
-                tcpMan.sendAck(localPort, destAddr, destPort, window, seqNum);
-            } else {
-                // todo send window 0 to choke
-            }
-        } else if(seqNum > transport.getSeqNum()) {
-            // assume last ack is lost
+        int newSeqNum = transport.getSeqNum();
+        if (newSeqNum < seqNum) {
+            // last ACK lost
             tcpMan.logOutput(TCPManager.RETRAN_DUP_SYMBOL);
-            tcpMan.sendAck(localPort, destAddr, destPort, window,
-                    transport.getSeqNum() + transport.getPayload().length);
+            tcpMan.sendAck(localPort, destAddr, destPort, rcvw, seqNum);
+            return ;
         }
+
+        // put into receiving window
+        WindowCell wc = new WindowCell(0, newSeqNum, 0, transport);
+        if (!recvWindow.contains(wc)) {
+            recvWindow.offer(wc);
+        } // will always send back an ack
+
+        // check first
+        while ((wc = recvWindow.peek()) != null && seqNum == wc.seqNum ) {
+            // check if first one the expected one
+            byte[] data = wc.transport.getPayload();
+            // TODO flow control
+            if (rb.free() < data.length) break; // stop if no room to write data
+
+            rb.write(data, 0, data.length);
+            tcpMan.logOutput("Accept\t" + data[0] + " -> " + data[data.length-1]);
+
+            seqNum += data.length;
+            recvWindow.poll();
+        }
+        // cumulative ack
+        tcpMan.logOutput("Sending ACK " + seqNum);
+        tcpMan.sendAck(localPort, destAddr, destPort, rcvw, seqNum);
     }
 
     public void onFIN() {
@@ -423,8 +476,12 @@ public class TCPSock {
     public void onSynAck(Transport transport) {
         if (seqNum + 1 == transport.getSeqNum()) {
             state = State.ESTABLISHED_WRITE;
-            rb = new RingBuffer(DATA_BUFFER_SIZE);
+
             ++seqNum;
+            // allocate resources
+            sendWindow = new ArrayDeque<>();
+            rb = new RingBuffer(DATA_BUFFER_SIZE);
+
             tcpMan.logOutput("Connection established.");
         }
     }

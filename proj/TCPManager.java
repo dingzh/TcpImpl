@@ -157,8 +157,6 @@ public class TCPManager {
         socks.remove(key);
     }
 
-
-
     /**
      * Bind port to a socket
      *
@@ -217,14 +215,14 @@ public class TCPManager {
     }
 
     void logOutput(String output) {
-        node.logOutput(output);
+        node.logOutput("time " + now() + " " + output);
     }
 
     void logError(String output) {
         node.logError(output);
     }
 
-    void socketClose() {
-        // TODO remove socket for match
+    long now() {
+        return manager.now();
     }
 }
