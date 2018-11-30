@@ -1,5 +1,4 @@
 import java.lang.reflect.Method;
-import java.security.AlgorithmConstraints;
 import java.util.*;
 
 import static java.lang.System.exit;
@@ -46,20 +45,20 @@ public class TCPSock {
     private int destPort = -1;
 
     private int seqNum = 0;
-//    private int window = 2;
     private int backlog = 0;
     private Queue<int[]> synQueue = null;
     private RingBuffer rb = null;     // one-way stream only one buffer needed
 
-    private long timeout = 90;
+    private long timeout = 30;
     private int rcvw = 1;
-    private int sedw = 10;
+    private int sedw = 1;
+    private int ackCnt = 0;
+    private int dAck = 0;
     private ArrayDeque<WindowCell> sendWindow = null;
     private PriorityQueue<WindowCell> recvWindow = null;
 
-    private int duplicateACK = 0;
-    private double RTT = 50;
-    private double RTTDev = 10;
+    private double RTT = 10;
+    private double RTTDev = 5;
 
     public TCPSock(TCPManager tcpMan) {
         this.tcpMan = tcpMan;
@@ -253,6 +252,12 @@ public class TCPSock {
                 synQueue = null;
                 break;
 
+            case SHUTDOWN:
+                state = State.CLOSED;
+                tcpMan.sendFin(localPort, destAddr, destPort);
+                tcpMan.closeSocket(this, localPort, destAddr, destPort);
+                break;
+
             default:
                 state = State.CLOSED;
         }
@@ -262,6 +267,7 @@ public class TCPSock {
      * Release a connection immediately (abortive shutdown)
      */
     public void release() {
+        if (state == State.CLOSED) return ;
         tcpMan.sendFin(localPort, destAddr, destPort);
         state = State.CLOSED;
         rb = null;
@@ -315,7 +321,10 @@ public class TCPSock {
         long now = tcpMan.now();
         while (sendWindow.size() < sedw) {
             int len = rb.avail();
-            if (len == 0) { return ; }
+            if (len == 0) {
+                if (state == State.SHUTDOWN && sendWindow.size() == 0) close();
+                return ;
+            }
             len = Math.min(len, Transport.MAX_PAYLOAD_SIZE);
 
             byte[] data = new byte[len];
@@ -341,63 +350,70 @@ public class TCPSock {
 
     public void retransmit() {
         // todo adjust sending window size
-        if (state != State.ESTABLISHED_WRITE ) return ;
+        if (state == State.SHUTDOWN && sendWindow.size() == 0) close();
+        if (state != State.ESTABLISHED_WRITE && state != State.SHUTDOWN) return ;
 
         WindowCell wc = sendWindow.peekFirst();
         // it's not possible for any ack segment to be on the head
+        Callback cb = new Callback(mRetransmit, this, null);
+        tcpMan.addTimer(timeout, cb);
+
         if (wc == null || wc.time + timeout > tcpMan.now()) {
             return ;
         }
 
-        // TODO debug only
         byte[] data = wc.transport.getPayload();
         tcpMan.logOutput("" + wc.seqNum + "\t" + data[0] + " -> " + data[data.length-1] + " timeout");
 
-        tcpMan.sendData(destAddr, wc.transport.pack());
+        // congestion control
+        sedw = Math.max(1, sedw / 2);
+        ackCnt = 0;
+        tcpMan.logOutput("Update sending window " + sedw);
 
-        Callback cb = new Callback(mRetransmit, this, null);
-        tcpMan.addTimer(timeout, cb);
+        wc.time = tcpMan.now();
+        tcpMan.sendData(destAddr, wc.transport.pack());
     }
 
     void onACK(int ack) {
-        if (sendWindow.size() == 0) return ; // no pending send
+        tcpMan.logOutput("ACK ACK ACK " + ack);
+        if (sendWindow.size() == 0) {
+            tcpMan.logOutput("acked "+ ack + ", no more pending.");
+            if (state == State.SHUTDOWN) close();
+            return ; // no pending send
+        }
 
         WindowCell wc = sendWindow.peekFirst();
-        while (wc != null) {
-            sendWindow.removeFirst();
+        if (ack == wc.seqNum) {
+            ++dAck ;
+            if (dAck == 3) { // resend
+                sendWindow.peekFirst();
+            }
+        }
 
-            if (ack == wc.seqNum) {
-                ++duplicateACK;
-                if (duplicateACK == 3) {
-                    duplicateACK = 0;
-                    byte[] data = wc.transport.getPayload();
-                    tcpMan.sendData(destAddr, wc.transport.pack());
-                    tcpMan.logOutput("" + seqNum + "\t" + data[0] + " -> " + data[data.length-1] + " dACK");
-                }
-
-                return ;
-            } else if (ack >= wc.seqNum + wc.dataLength) { // cumulative ack
-                duplicateACK = 0;
-                tcpMan.logOutput("ACKed\t" + ack);
-                tcpMan.logOutput(TCPManager.ACK_1_SYMBOL);
-
-//                if (ack == wc.seqNum + wc.dataLength) {
-                double sampleRTT = tcpMan.now() - wc.time;
-
-                RTT = (1 - ALPHA) * RTT + ALPHA * sampleRTT;
-                RTTDev = (1 - BETA) * RTTDev + BETA * Math.abs(sampleRTT - RTT);
-                timeout = (int) (RTT + 4 * RTTDev);
-                tcpMan.logOutput("Updating timeout to " + timeout);
-//                }
-
-                // try to send data
-                sendData();
-            } else {
-                // will not remove cause not ACKed
-                break;
+        while ( (wc = sendWindow.peekFirst()) != null && ack >= wc.seqNum + wc.dataLength) { // cumulative ack
+            // additive increase
+            dAck = 0;
+            ++ackCnt;
+            if (ackCnt == sedw) {
+                ++sedw;
+                ackCnt = 0;
+                tcpMan.logOutput("Update sending window " + sedw);
             }
 
-            wc = sendWindow.peekFirst();
+            tcpMan.logOutput("ACKed\t" + ack);
+            tcpMan.logOutput(TCPManager.ACK_1_SYMBOL);
+
+            double sampleRTT = tcpMan.now() - wc.time;
+
+            RTTDev = (1 - BETA) * RTTDev + BETA * Math.abs(sampleRTT - RTT);
+            RTT = (1 - ALPHA) * RTT + ALPHA * sampleRTT;
+            timeout = (int) (RTT + 4 * RTTDev);
+            tcpMan.logOutput("Update timeout: " + timeout + " RTT: " + RTT + " RTTDev: " + RTTDev);
+
+            sendWindow.removeFirst();
+            // try to send data
+            sendData();
+            if (state == State.SHUTDOWN && sendWindow.size() == 0) close();
         }
     }
 
@@ -433,6 +449,7 @@ public class TCPSock {
         int newSeqNum = transport.getSeqNum();
         if (newSeqNum < seqNum) {
             // last ACK lost
+            tcpMan.logOutput("last ack lost resend");
             tcpMan.logOutput(TCPManager.RETRAN_DUP_SYMBOL);
             tcpMan.sendAck(localPort, destAddr, destPort, rcvw, seqNum);
             return ;
@@ -442,7 +459,7 @@ public class TCPSock {
         WindowCell wc = new WindowCell(0, newSeqNum, 0, transport);
         if (!recvWindow.contains(wc)) {
             recvWindow.offer(wc);
-        } // will always send back an ack
+        }
 
         // check first
         while ((wc = recvWindow.peek()) != null && seqNum == wc.seqNum ) {

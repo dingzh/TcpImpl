@@ -96,14 +96,11 @@ public class TCPManager {
                 break;
 
             case Transport.ACK:
-                if (socket.isConnectionPending()) {
-                    // waiting to connect
+                if (socket.isConnectionPending()) { // waiting to connect
                     socket.onSynAck(transport);
-                } else if (socket.isConnected()) {
-                    // ack on data
+                } else if (socket.isConnected() || socket.isClosurePending()) { // ack on data
                     socket.onACK(transport.getSeqNum());
                 }
-
                 break;
 
             case Transport.FIN:
@@ -197,6 +194,7 @@ public class TCPManager {
     }
 
     void sendFin(int srcPort, int destAddr, int destPort) {
+        logOutput("Fin sent");
         Transport fin = new Transport(srcPort, destPort, Transport.FIN, 0, 0, dummy);
         node.sendSegment(addr, destAddr, Protocol.TRANSPORT_PKT, fin.pack());
     }

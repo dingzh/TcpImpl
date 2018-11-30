@@ -15,6 +15,6 @@ public class WindowCell implements Comparable<WindowCell> {
 
     @Override
     public int compareTo(WindowCell o) {
-        return -1 * Integer.compare(seqNum, o.seqNum);
+        return Integer.compare(seqNum, o.seqNum);
     }
 }
